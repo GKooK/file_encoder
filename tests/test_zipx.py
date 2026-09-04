@@ -302,5 +302,88 @@ class TestCLI(Base):
         self.assertFalse((self.tmp / "x").exists())
 
 
+class TestUnzipx(Base):
+    """해제 전용 프로그램(unzipx.py)이 zipx 로 만든 파일을 그대로 풀어야 한다."""
+
+    def run_unzipx(self, *args, script=None):
+        return subprocess.run([sys.executable, str(script or ROOT / "unzipx.py"), *args],
+                              capture_output=True, text=True)
+
+    def test_extracts_zipx_archive(self):
+        archive = self.make()
+        out = self.tmp / "out"
+        result = self.run_unzipx(str(archive), "-d", str(out), "-p", PASSWORD, "-q")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(tree(out / "자료"), self.expected)
+
+    def test_standalone(self):
+        """다른 폴더에 이 파일만 복사해도 동작해야 한다 (zipx.py 없이)."""
+        alone = self.tmp / "배포" / "unzipx.py"
+        alone.parent.mkdir()
+        shutil.copy(ROOT / "unzipx.py", alone)
+        self.assertFalse((alone.parent / "zipx.py").exists())
+        archive = self.make(sources=[self.src / "문서"])
+        out = self.tmp / "alone_out"
+        result = self.run_unzipx(str(archive), "-d", str(out), "-p", PASSWORD, "-q",
+                                 script=alone)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(tree(out / "문서"), tree(self.src / "문서"))
+
+    def test_list_and_test_options(self):
+        archive = self.make(sources=[self.src / "문서"])
+        result = self.run_unzipx(str(archive), "-l", "-p", PASSWORD)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("한글 이름.txt", result.stdout)
+        self.assertFalse((self.tmp / "문서" / "한글 이름.txt").exists())  # 풀지 않았음
+
+        result = self.run_unzipx(str(archive), "-t", "-p", PASSWORD, "-q")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("이상 없음", result.stdout)
+
+    def test_wrong_password(self):
+        archive = self.make(sources=[self.src / "ascii.txt"])
+        out = self.tmp / "no"
+        result = self.run_unzipx(str(archive), "-d", str(out), "-p", "틀림", "-q")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("비밀번호", result.stderr)
+        self.assertFalse(out.exists())
+
+    def test_tamper_rejected(self):
+        archive = self.make(sources=[self.src / "문서"])
+        raw = bytearray(archive.read_bytes())
+        raw[len(raw) // 2] ^= 0x01
+        bad = self.tmp / "bad.zipx"
+        bad.write_bytes(bytes(raw))
+        result = self.run_unzipx(str(bad), "-d", str(self.tmp / "bad_out"),
+                                 "-p", PASSWORD, "-q")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("무결성", result.stderr)
+
+    def test_rejects_other_files(self):
+        other = self.tmp / "plain.zip"
+        with zipfile.ZipFile(other, "w") as zf:
+            zf.writestr("a.txt", "x")
+        result = self.run_unzipx(str(other), "-p", PASSWORD, "-q")
+        self.assertEqual(result.returncode, 2)
+
+    def test_has_no_compression_code(self):
+        """해제 전용이므로 압축 기능이 들어 있으면 안 된다."""
+        sys.path.insert(0, str(ROOT))
+        import unzipx
+        self.assertFalse(hasattr(unzipx, "create"))
+        self.assertFalse(hasattr(unzipx, "BoxWriter"))
+
+    def test_same_container_constants(self):
+        """두 프로그램의 컨테이너 형식이 어긋나면 안 된다."""
+        import unzipx
+        self.assertEqual(unzipx.MAGIC, zipx.MAGIC)
+        self.assertEqual(unzipx.HEADER_LEN, zipx.HEADER_LEN)
+        self.assertEqual(unzipx.TAG_LEN, zipx.TAG_LEN)
+        key = os.urandom(32)
+        data = os.urandom(1024)
+        self.assertEqual(unzipx.PureAES256(key).encrypt(data),
+                         zipx.PureAES256(key).encrypt(data))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
